@@ -47,8 +47,7 @@ jobs:
             echo "..."
           else
             echo "No .config found, using defconfig instead"
-            cd ../openwrt
-            make defconfig
+            (cd ../openwrt && make defconfig)
           fi
 
           echo ""
@@ -100,7 +99,7 @@ jobs:
 
       - name: Compile Firmware (with BCM4313 SPROM fix by Python)
         run: |
-          set -e
+          set -e -o pipefail
           cd openwrt
           export CCACHE_DIR=/tmp/ccache
           export USE_CCACHE=1
@@ -121,50 +120,9 @@ jobs:
               echo "[OK] Found target memcpy line"
               cp "$KERNEL_SPROM" "${KERNEL_SPROM}.bak"
 
-              # Use heredoc (quoted) to avoid ALL bash escaping issues
-              # Python code is completely literal - no shell interpretation
-              export KERNEL_SPROM
-              python3 << 'PYEOF'
-import os
-path = os.environ['KERNEL_SPROM']
-
-with open(path, 'r') as f:
-    content = f.read()
-
-# Fix 1: Add forward declaration for sprom_extract
-old_if = '#if defined(CONFIG_BCMA_HOST_PCI)\nint bcm63xx_get_fallback_bcma_sprom'
-new_if = '#if defined(CONFIG_BCMA_HOST_PCI)\nstatic int sprom_extract(struct ssb_sprom *out, const u16 *in, u16 size);\n\nint bcm63xx_get_fallback_bcma_sprom'
-if old_if in content:
-    content = content.replace(old_if, new_if, 1)
-    print('[OK] Forward declaration added')
-else:
-    print('[WARN] Could not find insertion point for forward declaration')
-
-# Fix 2: Replace memcpy with BCM4313 detection + sprom_extract
-old_memcpy = '\t\tmemcpy(out, &fallback_sprom.sprom, sizeof(struct ssb_sprom));'
-new_code = '''\t\tif (bus->host_pci->device == 0x4313) {
-\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");
-\t\t\tsprom_extract(out, bcm4313_sprom,
-\t\t\t      ARRAY_SIZE(bcm4313_sprom));
-\t\t} else {
-\t\t\tmemcpy(out, &fallback_sprom.sprom,
-\t\t\t       sizeof(struct ssb_sprom));
-\t\t}'''
-
-if old_memcpy in content:
-    content = content.replace(old_memcpy, new_code, 1)
-    print('[OK] memcpy replaced with BCM4313 detection')
-else:
-    print('[WARN] Could not find target memcpy line')
-    for line in content.split('\n'):
-        if 'memcpy(out,' in line:
-            print('  Found: ' + line.strip())
-
-with open(path, 'w') as f:
-    f.write(content)
-
-print('[OK] BCM4313 SPROM fix applied successfully!')
-PYEOF
+              # Apply BCM4313 SPROM fix via external Python script
+              # Script lives in my-fork/scripts/ (checked out at repo root)
+              python3 ../my-fork/scripts/apply_bcm4313_sprom_fix.py "$KERNEL_SPROM"
 
               echo ""
               echo "--- Changes made ---"
@@ -211,7 +169,7 @@ PYEOF
             "*brcm_bcm96328avng*squashfs-cfe-16M*" \
             "*brcm_bcm96328avng*squashfs-sysupgrade*" \
             "*bcm96328avng*cfe*"; do
-            FOUND=$(find bin/targets/bcm63xx/smp/ -name $pattern 2>/dev/null | head -1)
+            FOUND=$(find bin/targets/bcm63xx/smp/ -name "$pattern" 2>/dev/null | head -1)
             if [ -n "$FOUND" ]; then
               TARGET_FILE="$FOUND"
               echo "[OK] Found primary image: $TARGET_FILE"
@@ -257,6 +215,12 @@ PYEOF
 
           # Find the kernel source dynamically (path may vary by OpenWrt version)
           KERNEL_SRC=$(find build_dir -type d -path "*/arch/mips/bcm63xx" 2>/dev/null | head -1)
+
+          if [ -z "$KERNEL_SRC" ]; then
+            echo "[SKIP] Kernel source directory not found"
+            exit 0
+          fi
+
           KERNEL_OBJ="$KERNEL_SRC/sprom.o"
 
           # 1) Check kernel was built
