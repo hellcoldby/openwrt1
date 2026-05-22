@@ -6,9 +6,12 @@ Usage:
     python3 apply_bcm4313_sprom_fix.py <path_to_sprom.c>
 
 This script applies two fixes to the kernel source:
-  1. Adds a forward declaration for sprom_extract().
-  2. Replaces the generic memcpy fallback with BCM4313-specific detection
-     that injects the correct LCN v8 SPROM via sprom_extract().
+  1. Adds a forward declaration for sprom_extract() before the BCMA function.
+  2. In bcm63xx_get_fallback_bcma_sprom() ONLY, replaces the generic
+     memcpy fallback with BCM4313-specific detection that injects the
+     correct LCN v8 SPROM via sprom_extract().
+     (The SSB function bcm63xx_get_fallback_sprom is deliberately
+     left untouched — it has no 'bus' variable in scope.)
 
 Both fixes use regex-based matching to tolerate whitespace variations
 across OpenWrt kernel versions.
@@ -30,19 +33,21 @@ FIX_1_REPLACEMENT = (
     r'\2'
 )
 
+# The memcpy pattern appears in TWO functions:
+#   bcm63xx_get_fallback_sprom        (SSB, ~line 390) — NO bus, DO NOT modify
+#   bcm63xx_get_fallback_bcma_sprom   (BCMA, ~line 425) — HAS bus, MUST modify
+# Anchor to the BCMA function declaration to target the correct one.
 FIX_2_PATTERN = re.compile(
-    r'\t*memcpy\s*\(\s*out\s*,\s*&fallback_sprom\.sprom\s*,'
-    r'\s*sizeof\s*\(\s*struct\s+ssb_sprom\s*\)\s*\)\s*;'
+    r'(int\s+bcm63xx_get_fallback_bcma_sprom\s*\([^)]*\)\s*\{.*?)'
+    r'(\t*memcpy\s*\(\s*out\s*,\s*&fallback_sprom\.sprom\s*,'
+    r'\s*sizeof\s*\(\s*struct\s+ssb_sprom\s*\)\s*\)\s*;)',
+    re.DOTALL
 )
 
 def _fix2_replacement(match):
-    """Return replacement code for BCM4313 SPROM injection.
-
-    Uses a callable (lambda-equivalent) to avoid re.sub's backslash
-    processing in string replacements, which would turn \\n into a
-    literal newline and break the C string literal.
-    """
-    return (
+    """Target only the BCMA function, preserving all code before memcpy."""
+    before = match.group(1)  # function start → just before memcpy
+    return before + (
         '\t\tif (bus->host_pci->device == 0x4313) {\n'
         '\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");\n'
         '\t\t\tsprom_extract(out, bcm4313_sprom,\n'
@@ -61,7 +66,7 @@ def main():
 
     path = sys.argv[1]
 
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     applied = False
@@ -92,7 +97,7 @@ def main():
                 print('  Found: ' + line.strip())
 
     if applied:
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
         print('[OK] BCM4313 SPROM fix applied successfully!')
     else:
