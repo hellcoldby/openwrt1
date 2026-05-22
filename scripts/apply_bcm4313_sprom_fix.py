@@ -5,15 +5,19 @@ Patch OpenWrt kernel sprom.c to inject BCM4313 v8 fallback SPROM data.
 Usage:
     python3 apply_bcm4313_sprom_fix.py <path_to_sprom.c>
 
-This script applies two fixes to the kernel source:
+This script applies three fixes to the kernel source:
   1. Adds a forward declaration for sprom_extract() before the BCMA function.
   2. In bcm63xx_get_fallback_bcma_sprom() ONLY, replaces the generic
      memcpy fallback with BCM4313-specific detection that injects the
      correct LCN v8 SPROM via sprom_extract().
      (The SSB function bcm63xx_get_fallback_sprom is deliberately
      left untouched — it has no 'bus' variable in scope.)
+  3. After sprom_extract(), writes a valid locally-administered MAC
+     into il0macaddr / et0macaddr / et1macaddr because the bcm4313_sprom
+     template has all-zero MAC fields, which brcmsmac rejects with
+     "bad macaddr" (code 22).
 
-Both fixes use regex-based matching to tolerate whitespace variations
+All fixes use regex-based matching to tolerate whitespace variations
 across OpenWrt kernel versions.
 """
 
@@ -52,6 +56,17 @@ def _fix2_replacement(match):
         '\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");\n'
         '\t\t\tsprom_extract(out, bcm4313_sprom,\n'
         '\t\t\t      ARRAY_SIZE(bcm4313_sprom));\n'
+        '\t\t\t/* bcm4313_sprom[] has zero MAC — brcmsmac\n'
+        '\t\t\t * rejects all-zero MAC (bad macaddr).\n'
+        '\t\t\t * Assign locally-administered unicast MAC. */\n'
+        '\t\t\tout->il0macaddr[0] = 0x02;\n'
+        '\t\t\tout->il0macaddr[1] = 0x00;\n'
+        '\t\t\tout->il0macaddr[2] = 0x0c;\n'
+        '\t\t\tout->il0macaddr[3] = 0xe3;\n'
+        '\t\t\tout->il0macaddr[4] = 0x43;\n'
+        '\t\t\tout->il0macaddr[5] = 0x13;\n'
+        '\t\t\tmemcpy(out->et0macaddr, out->il0macaddr, 6);\n'
+        '\t\t\tmemcpy(out->et1macaddr, out->il0macaddr, 6);\n'
         '\t\t} else {\n'
         '\t\t\tmemcpy(out, &fallback_sprom.sprom,\n'
         '\t\t\t       sizeof(struct ssb_sprom));\n'
@@ -87,7 +102,7 @@ def main():
     # ---------------------------------------------------------------
     new_content, count = FIX_2_PATTERN.subn(_fix2_replacement, content, count=1)
     if count > 0:
-        print('[OK] memcpy replaced with BCM4313 detection')
+        print('[OK] memcpy replaced with BCM4313 detection + MAC fix')
         content = new_content
         applied = True
     else:
