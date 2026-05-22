@@ -59,7 +59,7 @@ jobs:
               mkdir -p ../openwrt/files
               cp -rv files/* ../openwrt/files/
             }
-            echo "✓ Custom files overlaid into firmware image"
+            echo "[OK] Custom files overlaid into firmware image"
             find ../openwrt/files -type f | head -10
           else
             echo "(No custom files directory found, skipping)"
@@ -242,10 +242,10 @@ jobs:
             echo ""
             echo "=== Checking patched source ==="
             if grep -q "sprom_extract.*bcm4313_sprom" "$SRC_FILE"; then
-              echo "[✅ SUCCESS] BCM4313 SPROM patch found in compiled kernel source!"
+              echo "[SUCCESS] BCM4313 SPROM patch found in compiled kernel source!"
               grep -n "sprom_extract.*bcm4313\|BCM4313 LCN v8" "$SRC_FILE" | head -5
             else
-              echo "[❌ FAIL] BCM4313 patch NOT in compiled source!"
+              echo "[FAIL] BCM4313 patch NOT in compiled source!"
               echo "Checking fallback function..."
               grep -n "bcm63xx_get_fallback_bcma_sprom" "$SRC_FILE" | head -3 || true
               echo ""
@@ -259,8 +259,8 @@ jobs:
             echo ""
             echo "=== Checking compiled kernel object ==="
             strings "$KERNEL_OBJ" 2>/dev/null | grep -i "bcm4313\|LCN.*SPROM" && \
-              echo "[✅ SUCCESS] BCM4313 SPROM data is IN the kernel binary!" || \
-              echo "[⚠️] Could not find signature in .o (may be optimized out)"
+              echo "[SUCCESS] BCM4313 SPROM data is IN the kernel binary!" || \
+              echo "[WARN] Could not find signature in .o (may be optimized out)"
           fi
         shell: bash
 
