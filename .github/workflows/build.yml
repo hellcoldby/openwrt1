@@ -59,7 +59,7 @@ jobs:
               mkdir -p ../openwrt/files
               cp -rv files/* ../openwrt/files/
             }
-            chmod +x ../openwrt/files/etc/uci-defaults/*.sh
+            find ../openwrt/files -name "*.sh" -path "*/uci-defaults/*" -exec chmod +x {} \;
             echo "[OK] Custom files overlaid into firmware image (+x set)"
             find ../openwrt/files -type f | head -10
           else
@@ -238,6 +238,12 @@ jobs:
           cd openwrt
           echo "=== Verifying BCM4313 SPROM Patch in Built Kernel ==="
 
+          # Guard: if build_dir doesn't exist, skip (e.g. build failed early)
+          if [ ! -d "build_dir" ]; then
+            echo "[SKIP] No build_dir (build may have failed early)"
+            exit 0
+          fi
+
           # Find the kernel source dynamically (path may vary by OpenWrt version)
           KERNEL_SRC=$(find build_dir -type d -path "*/arch/mips/bcm63xx" 2>/dev/null | head -1)
 
@@ -247,12 +253,6 @@ jobs:
           fi
 
           KERNEL_OBJ="$KERNEL_SRC/sprom.o"
-
-          # 1) Check kernel was built
-          if [ ! -d "build_dir" ]; then
-            echo "[SKIP] No build_dir (build may have failed early)"
-            exit 0
-          fi
 
           if [ -f "$KERNEL_OBJ" ]; then
             echo "[OK] Kernel object exists: sprom.o"
