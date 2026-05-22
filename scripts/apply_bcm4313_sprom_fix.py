@@ -35,16 +35,23 @@ FIX_2_PATTERN = re.compile(
     r'\s*sizeof\s*\(\s*struct\s+ssb_sprom\s*\)\s*\)\s*;'
 )
 
-FIX_2_REPLACEMENT = (
-    '\t\tif (bus->host_pci->device == 0x4313) {\n'
-    '\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");\n'
-    '\t\t\tsprom_extract(out, bcm4313_sprom,\n'
-    '\t\t\t      ARRAY_SIZE(bcm4313_sprom));\n'
-    '\t\t} else {\n'
-    '\t\t\tmemcpy(out, &fallback_sprom.sprom,\n'
-    '\t\t\t       sizeof(struct ssb_sprom));\n'
-    '\t\t}'
-)
+def _fix2_replacement(match):
+    """Return replacement code for BCM4313 SPROM injection.
+
+    Uses a callable (lambda-equivalent) to avoid re.sub's backslash
+    processing in string replacements, which would turn \\n into a
+    literal newline and break the C string literal.
+    """
+    return (
+        '\t\tif (bus->host_pci->device == 0x4313) {\n'
+        '\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");\n'
+        '\t\t\tsprom_extract(out, bcm4313_sprom,\n'
+        '\t\t\t      ARRAY_SIZE(bcm4313_sprom));\n'
+        '\t\t} else {\n'
+        '\t\t\tmemcpy(out, &fallback_sprom.sprom,\n'
+        '\t\t\t       sizeof(struct ssb_sprom));\n'
+        '\t\t}'
+    )
 
 
 def main():
@@ -73,7 +80,7 @@ def main():
     # ---------------------------------------------------------------
     # Fix 2: Replace memcpy with BCM4313 detection + sprom_extract
     # ---------------------------------------------------------------
-    new_content, count = FIX_2_PATTERN.subn(FIX_2_REPLACEMENT, content, count=1)
+    new_content, count = FIX_2_PATTERN.subn(_fix2_replacement, content, count=1)
     if count > 0:
         print('[OK] memcpy replaced with BCM4313 detection')
         content = new_content
