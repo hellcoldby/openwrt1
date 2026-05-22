@@ -126,7 +126,7 @@ jobs:
 
               echo ""
               echo "=== Changes made ==="
-              diff -u "${KERNEL_SPROM}.bak" "$KERNEL_SPROM" | head -40
+              diff -u "${KERNEL_SPROM}.bak" "$KERNEL_SPROM" | head -40 || true
             else
               echo "[WARN] Target memcpy line not found in sprom.c"
               grep -c "bcm63xx_get_fallback_bcma_sprom" "$KERNEL_SPROM" || echo "Function not found!"
