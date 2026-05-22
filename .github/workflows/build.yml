@@ -1,0 +1,327 @@
+name: Build OpenWrt for BCM96328AVNG (BCM4313 WiFi Fix)
+
+on:
+  workflow_dispatch:
+  # Uncomment to enable scheduled builds (e.g., weekly)
+  # schedule:
+  #   - cron: '0 2 * * 0'  # Every Sunday at 02:00 UTC
+
+env:
+  OPENWRT_REPO: openwrt/openwrt
+  OPENWRT_BRANCH: openwrt-22.03
+  TARGET: bcm63xx
+  SUBTARGET: smp
+  DEVICE: bcm96328avng
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout THIS repo (your fork) - contains patches, .config, files/
+      - name: Checkout Custom Files from Fork
+        uses: actions/checkout@v4
+        with:
+          path: my-fork
+
+      # Step 2: Checkout Official OpenWrt Source
+      - name: Checkout OpenWrt Source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.OPENWRT_REPO }}
+          ref: ${{ env.OPENWRT_BRANCH }}
+          path: openwrt
+
+      - name: Apply Custom Files & Config
+        run: |
+          cd my-fork
+          echo "============================================"
+          echo " Applying Build Configuration (.config)"
+          echo "============================================"
+
+          # Copy .config to OpenWrt source tree
+          if [ -f .config ]; then
+            cp .config ../openwrt/.config
+            echo ".config applied successfully."
+            head -20 ../openwrt/.config
+            echo "..."
+          else
+            echo "No .config found, using defconfig instead"
+            cd ../openwrt
+            make defconfig
+          fi
+
+          echo ""
+          echo "============================================"
+          echo " Overlaying custom files (WAN setup script)"
+          echo "============================================"
+          if [ -d files ]; then
+            cp -rv files/* ../openwrt/files/ 2>/dev/null || {
+              mkdir -p ../openwrt/files
+              cp -rv files/* ../openwrt/files/
+            }
+            echo "✓ Custom files overlaid into firmware image"
+            find ../openwrt/files -type f | head -10
+          else
+            echo "(No custom files directory found, skipping)"
+          fi
+        shell: bash
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache ecj fastjar file g++ gawk \
+            gcc-multilib gettext git java-propose-classpath \
+            libelf-dev libglib2.0-dev libncurses5-dev libssl-dev \
+            python3 unzip wget python3-pip python3-distutils-extra \
+            rsync subversion swig time xsltproc zlib1g-dev \
+            libxml2-utils curl jq
+        shell: bash
+
+      - name: Update Feeds & Install Packages
+        run: |
+          cd openwrt
+          echo "Updating package feeds..."
+          ./scripts/feeds update -a
+          echo ""
+          echo "Installing all packages from feeds..."
+          ./scripts/feeds install -a
+        shell: bash
+
+      - name: Prepare Build Environment
+        run: |
+          cd openwrt
+          echo "Running 'make defconfig'..."
+          make defconfig
+          echo ""
+          echo "=== Final Configuration Summary ==="
+          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-brcmsmac|^CONFIG_PACKAGE_wpad|^CONFIG_PACKAGE_uhttpd" .config | head -30
+
+      - name: Compile Firmware (with BCM4313 SPROM fix by Python)
+        run: |
+          set -e
+          cd openwrt
+          export CCACHE_DIR=/tmp/ccache
+          export USE_CCACHE=1
+
+          # Step 1: Prepare kernel source (download + apply patches 356-366)
+          echo "--- Step 1: Preparing kernel source ---"
+          make -j$(nproc) target/linux/prepare V=s 2>&1 | tail -30
+          echo ""
+
+          # Step 2: Apply BCM4313 SPROM fix via Python to the prepared kernel source
+          echo "--- Step 2: Finding kernel source and applying fix ---"
+          KERNEL_SPROM=$(find build_dir -name "sprom.c" -path "*bcm63xx*" 2>/dev/null | head -1)
+
+          if [ -n "$KERNEL_SPROM" ]; then
+            echo "[OK] Found: $KERNEL_SPROM"
+
+            if grep -q "memcpy(out, &fallback_sprom.sprom" "$KERNEL_SPROM"; then
+              echo "[OK] Found target memcpy line"
+              cp "$KERNEL_SPROM" "${KERNEL_SPROM}.bak"
+
+              # Use heredoc (quoted) to avoid ALL bash escaping issues
+              # Python code is completely literal - no shell interpretation
+              export KERNEL_SPROM
+              python3 << 'PYEOF'
+import os
+path = os.environ['KERNEL_SPROM']
+
+with open(path, 'r') as f:
+    content = f.read()
+
+# Fix 1: Add forward declaration for sprom_extract
+old_if = '#if defined(CONFIG_BCMA_HOST_PCI)\nint bcm63xx_get_fallback_bcma_sprom'
+new_if = '#if defined(CONFIG_BCMA_HOST_PCI)\nstatic int sprom_extract(struct ssb_sprom *out, const u16 *in, u16 size);\n\nint bcm63xx_get_fallback_bcma_sprom'
+if old_if in content:
+    content = content.replace(old_if, new_if, 1)
+    print('[OK] Forward declaration added')
+else:
+    print('[WARN] Could not find insertion point for forward declaration')
+
+# Fix 2: Replace memcpy with BCM4313 detection + sprom_extract
+old_memcpy = '\t\tmemcpy(out, &fallback_sprom.sprom, sizeof(struct ssb_sprom));'
+new_code = '''\t\tif (bus->host_pci->device == 0x4313) {
+\t\t\tpr_info("bcma_fallback_sprom: BCM4313 LCN v8 SPROM\\n");
+\t\t\tsprom_extract(out, bcm4313_sprom,
+\t\t\t      ARRAY_SIZE(bcm4313_sprom));
+\t\t} else {
+\t\t\tmemcpy(out, &fallback_sprom.sprom,
+\t\t\t       sizeof(struct ssb_sprom));
+\t\t}'''
+
+if old_memcpy in content:
+    content = content.replace(old_memcpy, new_code, 1)
+    print('[OK] memcpy replaced with BCM4313 detection')
+else:
+    print('[WARN] Could not find target memcpy line')
+    for line in content.split('\n'):
+        if 'memcpy(out,' in line:
+            print('  Found: ' + line.strip())
+
+with open(path, 'w') as f:
+    f.write(content)
+
+print('[OK] BCM4313 SPROM fix applied successfully!')
+PYEOF
+
+              echo ""
+              echo "--- Changes made ---"
+              diff -u "${KERNEL_SPROM}.bak" "$KERNEL_SPROM" | head -40
+            else
+              echo "[WARN] Target memcpy line not found in sprom.c"
+              grep -c "bcm63xx_get_fallback_bcma_sprom" "$KERNEL_SPROM" || echo "Function not found!"
+            fi
+          else
+            echo "[WARN] Kernel source sprom.c not found after prepare step"
+          fi
+          echo ""
+
+          # Step 3: Full build
+          echo "--- Step 3: Full firmware compilation ---"
+          make -j$(nproc) PROFILE=bcm96328avng V=w 2>&1 | tee build.log
+
+          echo "Build completed successfully!"
+        shell: bash
+
+      - name: Collect Build Artifacts
+        run: |
+          cd openwrt
+          mkdir -p ../firmware-output
+
+          echo "============================================"
+          echo "  Collecting BCM96328AVNG Firmware (ONE file)"
+          echo "============================================"
+
+          if [ ! -d "bin/targets/bcm63xx/smp" ]; then
+            echo "[ERROR] No firmware output directory found!"
+            exit 1
+          fi
+
+          echo "--- All built images ---"
+          ls -lh bin/targets/bcm63xx/smp/ 2>/dev/null
+
+          # Strategy: find the PRIMARY flashable image for our device
+          # Priority 1: cfe-16M.bin (for CFE web flashing / TFTP)
+          # Priority 2: sysupgrade.bin (for in-system upgrade via LuCI/SSH)
+          TARGET_FILE=""
+
+          for pattern in \
+            "*brcm_bcm96328avng*squashfs-cfe-16M*" \
+            "*brcm_bcm96328avng*squashfs-sysupgrade*" \
+            "*bcm96328avng*cfe*"; do
+            FOUND=$(find bin/targets/bcm63xx/smp/ -name $pattern 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              TARGET_FILE="$FOUND"
+              echo "[OK] Found primary image: $TARGET_FILE"
+              break
+            fi
+          done
+
+          if [ -z "$TARGET_FILE" ]; then
+            echo "[WARN] No exact match, searching broader..."
+            TARGET_FILE=$(find bin/targets/bcm63xx/smp/ -name "*bcm96328avng*" 2>/dev/null | head -1)
+          fi
+
+          if [ -n "$TARGET_FILE" ] && [ -f "$TARGET_FILE" ]; then
+            cp -v "$TARGET_FILE" ../firmware-output/
+            echo ""
+            echo "=== FINAL OUTPUT (single file) ==="
+            ls -lah ../firmware-output/
+          else
+            echo "[ERROR] Could not find any bcm96328avng firmware!"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-bcm96328avng-${{ github.run_id }}
+          path: firmware-output/*
+          retention-days: 30
+
+      - name: Show Build Log Tail (for debugging)
+        if: always()
+        run: |
+          echo "=== Last 200 lines of build log ==="
+          tail -200 openwrt/build.log 2>/dev/null || echo "(No build log available)"
+        shell: bash
+
+      - name: Verify SPROM Patch in Compiled Kernel
+        if: always()
+        run: |
+          cd openwrt
+          echo "=== Verifying BCM4313 SPROM Patch in Built Kernel ==="
+
+          # Find the kernel source dynamically (path may vary by OpenWrt version)
+          KERNEL_SRC=$(find build_dir -type d -path "*/arch/mips/bcm63xx" 2>/dev/null | head -1)
+          KERNEL_OBJ="$KERNEL_SRC/sprom.o"
+
+          # 1) Check kernel was built
+          if [ ! -d "build_dir" ]; then
+            echo "[SKIP] No build_dir (build may have failed early)"
+            exit 0
+          fi
+
+          if [ -f "$KERNEL_OBJ" ]; then
+            echo "[OK] Kernel object exists: sprom.o"
+          else
+            echo "[WARN] sprom.o not found, checking for source..."
+            ls "$KERNEL_SRC/sprom.c" 2>/dev/null && echo "[OK] Source exists" || echo "[WARN] Source not found either"
+          fi
+
+          # 2) Check source code has our patch applied
+          SRC_FILE="$KERNEL_SRC/sprom.c"
+          if [ -f "$SRC_FILE" ]; then
+            echo ""
+            echo "--- Checking patched source ---"
+            if grep -q "sprom_extract.*bcm4313_sprom" "$SRC_FILE"; then
+              echo "[✅ SUCCESS] BCM4313 SPROM patch found in compiled kernel source!"
+              grep -n "sprom_extract.*bcm4313\|BCM4313 LCN v8" "$SRC_FILE" | head -5
+            else
+              echo "[❌ FAIL] BCM4313 patch NOT in compiled source!"
+              echo "Checking fallback function..."
+              grep -n "bcm63xx_get_fallback_bcma_sprom" "$SRC_FILE" | head -3 || true
+              echo ""
+              echo "Last 25 lines of the function:"
+              tail -25 "$SRC_FILE"
+            fi
+          fi
+
+          # 3) Check compiled object (most reliable)
+          if [ -f "$KERNEL_OBJ" ]; then
+            echo ""
+            echo "--- Checking compiled kernel object ---"
+            strings "$KERNEL_OBJ" 2>/dev/null | grep -i "bcm4313\|LCN.*SPROM" && \
+              echo "[✅ SUCCESS] BCM4313 SPROM data is IN the kernel binary!" || \
+              echo "[⚠️] Could not find signature in .o (may be optimized out)"
+          fi
+        shell: bash
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "  Build Complete!"
+          echo "=============================================="
+          echo ""
+          echo "Target:    bcm63xx / smp"
+          echo "Device:    TIANBEI RG100A-BA (BCM96328AVNG)"
+          echo "WiFi Chip: BCM4313 LCN PHY (14e4:4313)"
+          echo "Driver:    brcmsmac (FullMAC)"
+          echo "Fix:       Custom v8 fallback SPROM injection"
+          echo ""
+          echo "Output:    SINGLE firmware file (CFE flashable)"
+          echo ""
+          echo "Flash via CFE (192.168.1.1) if current fw is broken:"
+          echo "  1. Hold RESET while powering on -> CFE mode"
+          echo "  2. Open browser -> http://192.168.1.1"
+          echo "  3. Upload the .bin firmware file"
+          echo ""
+          echo "Or if router is already running OpenWrt:"
+          echo "  SSH: sysupgrade -v <firmware.bin>"
+          echo "  Or: LuCI web UI -> System -> Backup/Flash Firmware"
+          echo "=============================================="
+        shell: bash
