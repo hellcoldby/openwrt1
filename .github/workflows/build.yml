@@ -105,12 +105,12 @@ jobs:
           export USE_CCACHE=1
 
           # Step 1: Prepare kernel source (download + apply patches 356-366)
-          echo "--- Step 1: Preparing kernel source ---"
+          echo "=== Step 1: Preparing kernel source ==="
           make -j$(nproc) target/linux/prepare V=s 2>&1 | tail -30
           echo ""
 
           # Step 2: Apply BCM4313 SPROM fix via Python to the prepared kernel source
-          echo "--- Step 2: Finding kernel source and applying fix ---"
+          echo "=== Step 2: Finding kernel source and applying fix ==="
           KERNEL_SPROM=$(find build_dir -name "sprom.c" -path "*bcm63xx*" 2>/dev/null | head -1)
 
           if [ -n "$KERNEL_SPROM" ]; then
@@ -125,7 +125,7 @@ jobs:
               python3 ../my-fork/scripts/apply_bcm4313_sprom_fix.py "$KERNEL_SPROM"
 
               echo ""
-              echo "--- Changes made ---"
+              echo "=== Changes made ==="
               diff -u "${KERNEL_SPROM}.bak" "$KERNEL_SPROM" | head -40
             else
               echo "[WARN] Target memcpy line not found in sprom.c"
@@ -137,7 +137,7 @@ jobs:
           echo ""
 
           # Step 3: Full build
-          echo "--- Step 3: Full firmware compilation ---"
+          echo "=== Step 3: Full firmware compilation ==="
           make -j$(nproc) PROFILE=bcm96328avng V=w 2>&1 | tee build.log
 
           echo "Build completed successfully!"
@@ -157,7 +157,7 @@ jobs:
             exit 1
           fi
 
-          echo "--- All built images ---"
+          echo "=== All built images ==="
           ls -lh bin/targets/bcm63xx/smp/ 2>/dev/null
 
           # Strategy: find the PRIMARY flashable image for our device
@@ -240,7 +240,7 @@ jobs:
           SRC_FILE="$KERNEL_SRC/sprom.c"
           if [ -f "$SRC_FILE" ]; then
             echo ""
-            echo "--- Checking patched source ---"
+            echo "=== Checking patched source ==="
             if grep -q "sprom_extract.*bcm4313_sprom" "$SRC_FILE"; then
               echo "[✅ SUCCESS] BCM4313 SPROM patch found in compiled kernel source!"
               grep -n "sprom_extract.*bcm4313\|BCM4313 LCN v8" "$SRC_FILE" | head -5
@@ -257,7 +257,7 @@ jobs:
           # 3) Check compiled object (most reliable)
           if [ -f "$KERNEL_OBJ" ]; then
             echo ""
-            echo "--- Checking compiled kernel object ---"
+            echo "=== Checking compiled kernel object ==="
             strings "$KERNEL_OBJ" 2>/dev/null | grep -i "bcm4313\|LCN.*SPROM" && \
               echo "[✅ SUCCESS] BCM4313 SPROM data is IN the kernel binary!" || \
               echo "[⚠️] Could not find signature in .o (may be optimized out)"
