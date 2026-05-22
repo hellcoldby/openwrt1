@@ -59,7 +59,8 @@ jobs:
               mkdir -p ../openwrt/files
               cp -rv files/* ../openwrt/files/
             }
-            echo "[OK] Custom files overlaid into firmware image"
+            chmod +x ../openwrt/files/etc/uci-defaults/*.sh
+            echo "[OK] Custom files overlaid into firmware image (+x set)"
             find ../openwrt/files -type f | head -10
           else
             echo "(No custom files directory found, skipping)"
@@ -94,8 +95,32 @@ jobs:
           echo "Running 'make defconfig'..."
           make defconfig
           echo ""
+          echo "=== Verifying critical packages (LuCI + WiFi) ==="
+          FAIL=0
+          for pkg in \
+            luci-base luci-mod-status luci-mod-system luci-mod-network \
+            luci-theme-bootstrap luci-app-firewall luci-app-opkg \
+            luci-compat luci-proto-ppp luci-proto-ipv6 \
+            lua liblucihttp-lua liblucihttp rpcd rpcd-mod-rpcsys \
+            uhttpd uhttpd-mod-ubus \
+            kmod-brcmsmac wpad-basic-wolfssl; do
+            cfg="CONFIG_PACKAGE_${pkg}"
+            if grep -q "^${cfg}=y" .config; then
+              echo "  [OK] $pkg"
+            else
+              echo "  [MISS] $pkg — forcing enable"
+              echo "${cfg}=y" >> .config
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "Packages were missing, re-running 'make defconfig' to resolve dependencies..."
+            make defconfig
+          fi
+          echo ""
           echo "=== Final Configuration Summary ==="
-          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-brcmsmac|^CONFIG_PACKAGE_wpad|^CONFIG_PACKAGE_uhttpd" .config | head -30
+          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-brcmsmac|^CONFIG_PACKAGE_wpad|^CONFIG_PACKAGE_uhttpd|^CONFIG_PACKAGE_luci" .config | head -40
 
       - name: Compile Firmware (with BCM4313 SPROM fix by Python)
         run: |
@@ -138,7 +163,7 @@ jobs:
 
           # Step 3: Full build
           echo "=== Step 3: Full firmware compilation ==="
-          make -j$(nproc) PROFILE=bcm96328avng V=w 2>&1 | tee build.log
+          make -j$(nproc) PROFILE=tianbei_rg100a_ba V=w 2>&1 | tee build.log
 
           echo "Build completed successfully!"
         shell: bash
